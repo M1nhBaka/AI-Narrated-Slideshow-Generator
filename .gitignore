@@ -1,0 +1,5 @@
+/ENV_SETUP.md
+/backend/node_modules
+/backend/output
+/backend/.env
+/backend/ELEVENLABS_SETUP.md
