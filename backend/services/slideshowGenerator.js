@@ -351,7 +351,75 @@ async function mergeClipsWithTransitions(
 }
 
 /**
+ * Build FFmpeg drawtext filters for subtitles (no SRT file needed)
+ */
+async function buildDrawtextFilters(scenes) {
+  let currentTime = 0;
+  const filters = [];
+
+  for (let i = 0; i < scenes.length; i++) {
+    const scene = scenes[i];
+    const audioPath = scene.audioUrl
+      ? path.join(__dirname, "..", scene.audioUrl)
+      : null;
+
+    let duration = 5;
+    if (audioPath) {
+      try {
+        duration = await getAudioDuration(audioPath);
+      } catch (error) {
+        console.warn(`Could not get audio duration for scene ${i + 1}`);
+      }
+    }
+    duration = Math.max(3, duration);
+
+    // Truncate or wrap long text
+    let text = scene.dialogue || scene.description || `Scene ${i + 1}`;
+
+    // Split long text into max 100 characters per line
+    if (text.length > 100) {
+      const words = text.split(" ");
+      const lines = [];
+      let currentLine = "";
+
+      for (const word of words) {
+        if ((currentLine + " " + word).length > 100 && currentLine.length > 0) {
+          lines.push(currentLine.trim());
+          currentLine = word;
+        } else {
+          currentLine = currentLine ? currentLine + " " + word : word;
+        }
+      }
+      if (currentLine) lines.push(currentLine.trim());
+
+      // Take only first 2 lines
+      text = lines.slice(0, 2).join("\n");
+    }
+
+    text = text
+      .replace(/'/g, "'\\\\\\''") // Escape single quotes for FFmpeg
+      .replace(/:/g, "\\:"); // Escape colons
+
+    const startTime = currentTime;
+    const endTime = currentTime + duration;
+
+    // Create drawtext filter for this subtitle with text wrapping
+    filters.push(
+      `drawtext=text='${text}':fontcolor=white:fontsize=28:` +
+        `borderw=3:bordercolor=black:x=(w-text_w)/2:y=h-120:` +
+        `enable='between(t,${startTime},${endTime})'`
+    );
+
+    currentTime += duration;
+  }
+
+  // Chain all filters together
+  return filters.join(",");
+}
+
+/**
  * Simple concatenation without transitions (faster, more reliable)
+ * Now with subtitle support!
  */
 async function createSimpleSlideshow(scenes, options = {}) {
   try {
@@ -388,9 +456,10 @@ async function createSimpleSlideshow(scenes, options = {}) {
     const concatContent = videoClips.map((clip) => `file '${clip}'`).join("\n");
     await fs.writeFile(concatFilePath, concatContent);
 
-    // Concatenate using concat demuxer (no re-encoding needed)
+    // Concatenate videos first (without subtitles)
     const outputFilename = `slideshow_${Date.now()}.mp4`;
-    const outputPath = path.join(OUTPUT_DIR, outputFilename);
+    const tempOutputPath = path.join(TEMP_DIR, `temp_${outputFilename}`);
+    const finalOutputPath = path.join(OUTPUT_DIR, outputFilename);
 
     await new Promise((resolve, reject) => {
       ffmpeg()
@@ -405,10 +474,33 @@ async function createSimpleSlideshow(scenes, options = {}) {
           "-pix_fmt yuv420p",
           "-movflags +faststart",
         ])
-        .output(outputPath)
-        .on("start", (cmd) => console.log("FFmpeg:", cmd))
+        .output(tempOutputPath)
+        .on("start", (cmd) => console.log("FFmpeg concat:", cmd))
         .on("progress", (p) => {
-          if (p.percent) console.log(`Progress: ${p.percent.toFixed(1)}%`);
+          if (p.percent) console.log(`Concat: ${p.percent.toFixed(1)}%`);
+        })
+        .on("end", resolve)
+        .on("error", reject)
+        .run();
+    });
+
+    // Build drawtext filter for subtitles (avoids SRT path issues on Windows)
+    console.log("🔥 Adding subtitles to video...");
+    const drawtextFilters = await buildDrawtextFilters(scenes);
+
+    await new Promise((resolve, reject) => {
+      ffmpeg()
+        .input(tempOutputPath)
+        .outputOptions([
+          "-vf",
+          drawtextFilters,
+          "-c:a copy",
+          "-pix_fmt yuv420p",
+        ])
+        .output(finalOutputPath)
+        .on("start", (cmd) => console.log("FFmpeg subtitle burn:", cmd))
+        .on("progress", (p) => {
+          if (p.percent) console.log(`Subtitles: ${p.percent.toFixed(1)}%`);
         })
         .on("end", resolve)
         .on("error", reject)
@@ -420,8 +512,9 @@ async function createSimpleSlideshow(scenes, options = {}) {
       await fs.unlink(clip).catch(() => {});
     }
     await fs.unlink(concatFilePath).catch(() => {});
+    await fs.unlink(tempOutputPath).catch(() => {});
 
-    console.log("Simple slideshow created successfully!");
+    console.log("✅ Simple slideshow with subtitles created successfully!");
     return `/output/final/${outputFilename}`;
   } catch (error) {
     console.error("Simple slideshow creation failed:", error);
