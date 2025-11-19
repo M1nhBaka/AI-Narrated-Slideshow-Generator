@@ -7,7 +7,7 @@ const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
  */
 async function analyzeScript(scriptText) {
   try {
-    const prompt = `Analyze this animation script and extract detailed information.
+    const prompt = `Analyze this animation script and extract detailed information. For each character, you MUST create detailed visual descriptions even if not explicitly stated in the script. Use context clues and common storytelling tropes to infer appearance.
 
 Script:
 ${scriptText}
@@ -16,19 +16,24 @@ Please provide a JSON response with:
 1. characters: Array of characters with:
    - id: unique number
    - name: character name
-   - description: brief description
-   - age: approximate age (if mentioned)
-   - gender: male/female/other
-   - appearance: physical appearance details
-   - clothing: what they wear
-   - personality: personality traits
-   - voiceStyle: voice characteristics (e.g., "young girl voice", "deep male voice")
+   - description: brief role/description
+   - age: approximate age (infer if not stated, e.g., "young girl" = 6-10, "explorer" = 25-40)
+   - gender: male/female/other (infer from name/context if needed)
+   - appearance: REQUIRED - physical appearance details (hair color, hair style, eye color, facial features, body type, height, distinctive marks). Example: "long brown hair, bright blue eyes, fair skin, petite build, freckles on cheeks"
+   - clothing: REQUIRED - what they wear based on their role/setting. Example: "pink adventure dress with boots" or "explorer's outfit with leather jacket and hat"
+   - personality: personality traits inferred from story/role
+   - voiceStyle: voice characteristics based on age/gender (e.g., "cheerful young girl voice", "deep weathered male voice", "warm motherly voice")
+
+IMPORTANT: 
+- appearance and clothing fields CANNOT be empty
+- If script doesn't describe them, CREATE realistic descriptions based on the character's role, age, and story context
+- Be specific and vivid (colors, styles, distinctive features)
 
 2. setting: Object with:
    - location: where the story takes place
    - time: time of day/year
    - mood: overall mood/atmosphere
-   - artStyle: suggested animation style (e.g., "Pixar style", "anime", "2D cartoon")
+   - artStyle: suggested animation style (e.g., "Pixar style", "anime", "Studio Ghibli style", "Disney 2D")
    - colors: color palette description
    - environment: environmental details
 
@@ -41,7 +46,7 @@ Please provide a JSON response with:
 Return ONLY valid JSON, no additional text.`;
 
     const model = genAI.getGenerativeModel({
-      model: "gemini-2.5-flash",
+      model: "gemini-2.0-flash",
     });
     const geminiPrompt = `${prompt}\n\nReturn ONLY valid JSON.`;
     const result = await model.generateContent(geminiPrompt);
@@ -153,7 +158,7 @@ Provide a detailed, vivid description that includes:
 Keep it concise (2-3 sentences) but visually rich.`;
 
     const model = genAI.getGenerativeModel({
-      model: "gemini-2.5-flash",
+      model: "gemini-2.0-flash",
     });
     const result = await model.generateContent(prompt);
     return result.response.text().trim();

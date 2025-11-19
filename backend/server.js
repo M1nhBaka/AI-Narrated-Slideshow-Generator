@@ -12,13 +12,11 @@ dotenv.config();
 const scriptAnalyzer = require("./services/scriptAnalyzer");
 const sceneSegmenter = require("./services/sceneSegmenter");
 const imageGenerator = require("./services/imageGenerator");
-const videoGenerator = require("./services/videoGenerator");
 const voiceGenerator = require("./services/voiceGenerator");
-const videoMerger = require("./services/videoMerger");
+// const videoMerger = require("./services/videoMerger");
 const slideshowGenerator = require("./services/slideshowGenerator");
 
 const app = express();
-const upload = multer({ dest: "uploads/" });
 
 // Middleware
 app.use(cors());
@@ -118,6 +116,36 @@ app.post("/api/scenes/segment/:jobId", async (req, res) => {
   }
 });
 
+// 3.5. Update scenes (after user edits)
+app.put("/api/scenes/update/:jobId", async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    const { scenes } = req.body;
+    const job = jobs.get(jobId);
+
+    if (!job) {
+      return res.status(404).json({ error: "Job not found" });
+    }
+
+    if (!scenes || !Array.isArray(scenes)) {
+      return res.status(400).json({ error: "Invalid scenes data" });
+    }
+
+    console.log(`Updating ${scenes.length} scenes for job ${jobId}`);
+    job.scenes = scenes;
+    jobs.set(jobId, job);
+
+    res.json({
+      status: "success",
+      message: "Scenes updated successfully",
+      scenes,
+    });
+  } catch (error) {
+    console.error("Scene update error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // 4. Generate images for all scenes
 app.post("/api/images/generate/:jobId", async (req, res) => {
   try {
@@ -130,9 +158,9 @@ app.post("/api/images/generate/:jobId", async (req, res) => {
 
     console.log(`Generating images for ${job.scenes.length} scenes...`);
 
-    // Generate consistency seed for this job - ensures similar style across all scenes
-    const consistencySeed = imageGenerator.generateConsistencySeed(jobId);
-    console.log(`Using consistency seed ${consistencySeed} for job ${jobId}`);
+    // Don't use consistency seed - let each scene have unique composition
+    // Character appearance consistency is maintained through detailed prompts
+    console.log(`Generating unique images for each scene (no seed lock)`);
 
     // Process scenes sequentially to avoid rate limits
     for (let i = 0; i < job.scenes.length; i++) {
@@ -143,7 +171,7 @@ app.post("/api/images/generate/:jobId", async (req, res) => {
         scene,
         job.analysis.characters,
         job.analysis.setting.artStyle,
-        consistencySeed // Pass seed for consistency
+        null // No consistency seed - allow variation
       );
 
       job.scenes[i].imageUrl = imageUrl;
@@ -163,56 +191,54 @@ app.post("/api/images/generate/:jobId", async (req, res) => {
   }
 });
 
-// 5. Generate videos from images (OPTIONAL - not needed for slideshow workflow)
-// This endpoint creates animated videos with pan/zoom from images
-// For narrated slideshow, skip this step and go directly to merge
-app.post("/api/videos/generate/:jobId", async (req, res) => {
-  try {
-    const { jobId } = req.params;
-    const job = jobs.get(jobId);
+// 5. Generate videos from images
+// app.post("/api/videos/generate/:jobId", async (req, res) => {
+//   try {
+//     const { jobId } = req.params;
+//     const job = jobs.get(jobId);
 
-    if (!job || !job.scenes) {
-      return res.status(404).json({ error: "Job or scenes not found" });
-    }
+//     if (!job || !job.scenes) {
+//       return res.status(404).json({ error: "Job or scenes not found" });
+//     }
 
-    console.log(
-      `[OPTIONAL] Generating animated videos for ${job.scenes.length} scenes...`
-    );
-    console.log(
-      "Note: This step is not required for slideshow. Use /api/videos/merge directly."
-    );
+//     console.log(
+//       `[OPTIONAL] Generating animated videos for ${job.scenes.length} scenes...`
+//     );
+//     console.log(
+//       "Note: This step is not required for slideshow. Use /api/videos/merge directly."
+//     );
 
-    for (let i = 0; i < job.scenes.length; i++) {
-      const scene = job.scenes[i];
+//     for (let i = 0; i < job.scenes.length; i++) {
+//       const scene = job.scenes[i];
 
-      if (!scene.imageUrl) {
-        throw new Error(`Scene ${i + 1} has no image`);
-      }
+//       if (!scene.imageUrl) {
+//         throw new Error(`Scene ${i + 1} has no image`);
+//       }
 
-      console.log(`Generating video for scene ${i + 1}/${job.scenes.length}`);
+//       console.log(`Generating video for scene ${i + 1}/${job.scenes.length}`);
 
-      const videoUrl = await videoGenerator.generateVideoFromImage(
-        scene.imageUrl,
-        scene.action
-      );
+//       const videoUrl = await videoGenerator.generateVideoFromImage(
+//         scene.imageUrl,
+//         scene.action
+//       );
 
-      job.scenes[i].videoUrl = videoUrl;
-      jobs.set(jobId, job);
-    }
+//       job.scenes[i].videoUrl = videoUrl;
+//       jobs.set(jobId, job);
+//     }
 
-    job.status = "videos_generated";
-    jobs.set(jobId, job);
+//     job.status = "videos_generated";
+//     jobs.set(jobId, job);
 
-    res.json({
-      status: "success",
-      scenes: job.scenes,
-      message: "Videos generated. For slideshow, you can skip this step.",
-    });
-  } catch (error) {
-    console.error("Video generation error:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
+//     res.json({
+//       status: "success",
+//       scenes: job.scenes,
+//       message: "Videos generated. For slideshow, you can skip this step.",
+//     });
+//   } catch (error) {
+//     console.error("Video generation error:", error);
+//     res.status(500).json({ error: error.message });
+//   }
+// });
 
 // 6. Generate audio/voices
 app.post("/api/audio/generate/:jobId", async (req, res) => {
@@ -291,9 +317,12 @@ app.post("/api/videos/merge/:jobId", async (req, res) => {
     job.completedAt = new Date();
     jobs.set(jobId, job);
 
+    console.log("✅ Slideshow created:", finalVideoPath);
+
     res.json({
       status: "success",
       videoUrl: finalVideoPath,
+      finalVideoUrl: finalVideoPath, // Also include for backward compatibility
       sceneCount: job.scenes.length,
     });
   } catch (error) {
@@ -351,7 +380,7 @@ app.post("/api/workflow/process", async (req, res) => {
   }
 });
 
-// Background workflow processor
+// // Background workflow processor
 // async function processWorkflow(jobId, script) {
 //   const job = jobs.get(jobId);
 
@@ -383,18 +412,15 @@ app.post("/api/workflow/process", async (req, res) => {
 //     job.status = "generating_images";
 //     jobs.set(jobId, job);
 
-//     // Generate consistency seed for this job
-//     const consistencySeed = imageGenerator.generateConsistencySeed(jobId);
-//     console.log(
-//       `Using consistency seed ${consistencySeed} for workflow job ${jobId}`
-//     );
+//     // Don't use consistency seed - allow unique compositions per scene
+//     console.log(`Generating diverse images for workflow job ${jobId}`);
 
 //     for (let i = 0; i < scenes.length; i++) {
 //       const imageUrl = await imageGenerator.generateSceneImage(
 //         scenes[i],
 //         analysis.characters,
 //         analysis.setting.artStyle,
-//         consistencySeed // Pass seed for consistency
+//         null // No seed - allow variation in composition and angles
 //       );
 //       job.scenes[i].imageUrl = imageUrl;
 //       job.progress = 30 + ((i + 1) / scenes.length) * 20;
@@ -450,7 +476,7 @@ app.get("/health", (req, res) => {
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`\n🎬 Narrated Slideshow Generator API`);
+  console.log(`\n Narrated Slideshow Generator API`);
   console.log(`==================================`);
   console.log(`\nWorkflow endpoints:`);
   console.log(`  1. POST /api/script/analyze - Analyze script`);
@@ -466,7 +492,7 @@ app.listen(PORT, () => {
   console.log(`  POST /api/workflow/process - Complete workflow`);
   console.log(`\nStatus:`);
   console.log(`  GET  /api/jobs/:jobId - Check job status`);
-  console.log(`\n✨ Ready to create narrated slideshows!\n`);
+  console.log(`\ Ready to create narrated slideshows!\n`);
 });
 
 module.exports = app;

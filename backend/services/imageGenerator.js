@@ -3,8 +3,12 @@ const path = require("path");
 const fs = require("fs");
 const fsp = fs.promises;
 const axios = require("axios");
+
+// API Keys & Config
 const STABILITY_API_KEY = process.env.STABILITY_API_KEY;
-const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || ""; // e.g. http://localhost:3001
+const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+const IMAGE_PROVIDER = process.env.IMAGE_PROVIDER || "stability"; // "stability" or "pollinations"
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || "";
 
 const IMAGES_DIR = path.join(__dirname, "../output/images");
 
@@ -13,11 +17,10 @@ async function ensureDir() {
 }
 
 /**
- * Build a detailed character reference that stays consistent across scenes
+ * Build a detailed character reference
  */
 function buildCharacterReference(characters) {
   if (!characters || characters.length === 0) return "";
-
   return characters
     .map((c) => {
       const details = [
@@ -37,12 +40,10 @@ function buildCharacterReference(characters) {
  * Build improved prompt with consistency features
  */
 function buildPrompt(scene, characters, artStyle) {
-  // 1. Get characters in this scene with full details
   const sceneCharacters = (scene.characters || [])
     .map((n) => (characters || []).find((x) => x.name === n))
     .filter(Boolean);
 
-  // 2. Build detailed character descriptions for consistency
   const characterDesc = sceneCharacters
     .map((c) => {
       const traits = [c.appearance, c.clothing, c.age ? `age ${c.age}` : null]
@@ -50,47 +51,39 @@ function buildPrompt(scene, characters, artStyle) {
         .join(", ");
       return `${c.name}: ${traits}`;
     })
-    .join("; ");
+    .join(". ");
 
-  // 3. Build main scene description
-  const sceneDesc = scene.description || "";
-  const action = scene.action ? `${scene.action}` : "";
+  const style = artStyle || "anime style, soft pastel colors";
+  const desc = scene.description || scene.title || "a scene";
 
-  // 4. Add consistency and style keywords
-  const styleDesc = artStyle || "high quality digital art";
   const consistencyKeywords = [
     "consistent character design",
     "same character throughout",
     "model sheet style",
-    "character consistency",
   ].join(", ");
 
-  // 5. Construct final prompt with proper structure
-  const promptParts = [
-    sceneDesc,
-    action ? `Action: ${action}` : "",
-    characterDesc ? `Characters: ${characterDesc}` : "",
-    `Style: ${styleDesc}`,
-    `Quality: ${consistencyKeywords}, detailed, professional illustration`,
+  const qualityKeywords = "detailed, professional illustration, high quality";
+
+  const parts = [
+    desc,
+    characterDesc && `Characters: ${characterDesc}`,
+    `Art style: ${style}`,
+    consistencyKeywords,
+    qualityKeywords,
   ].filter(Boolean);
 
-  return promptParts.join(". ");
+  return parts.join(". ");
 }
 
 /**
- * Build negative prompt to avoid inconsistencies
+ * Build negative prompt
  */
 function buildNegativePrompt() {
   return [
     "inconsistent character design",
     "different face",
-    "different appearance",
-    "multiple versions",
     "bad anatomy",
-    "deformed",
     "disfigured",
-    "poorly drawn",
-    "extra limbs",
     "blurry",
     "low quality",
     "watermark",
@@ -98,8 +91,88 @@ function buildNegativePrompt() {
 }
 
 /**
- * Generate image for a scene using Stability AI (SDXL)
- * Returns a public-ish relative URL under /output/images
+ * Generate image using Pollinations AI (Free alternative)
+ */
+async function generateWithPollinations(prompt, filename, outPath) {
+  console.log("Using Pollinations AI (free) for prompt:", prompt + "...");
+
+  // Pollinations.ai - Free text-to-image API
+  const encodedPrompt = encodeURIComponent(prompt);
+  const pollinationsUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&nologo=true&model=flux`;
+
+  try {
+    const response = await axios.get(pollinationsUrl, {
+      responseType: "arraybuffer",
+      timeout: 60000,
+    });
+
+    await fsp.writeFile(outPath, Buffer.from(response.data));
+    console.log("Image generated successfully with Pollinations");
+  } catch (error) {
+    console.error("Pollinations error:", error.message);
+    throw error;
+  }
+}
+
+/**
+ * Generate image using Stability AI (SDXL)
+ */
+async function generateWithStability(
+  prompt,
+  negativePrompt,
+  filename,
+  outPath,
+  consistencySeed
+) {
+  if (!STABILITY_API_KEY) {
+    throw new Error("Missing STABILITY_API_KEY env var");
+  }
+
+  console.log("Using Stability AI for prompt:", prompt.slice(0, 100) + "...");
+  console.log("Using consistency seed:", consistencySeed || "random");
+
+  const requestBody = {
+    text_prompts: [
+      { text: prompt, weight: 1 },
+      { text: negativePrompt, weight: -1 },
+    ],
+    width: 1024,
+    height: 1024,
+    samples: 1,
+    cfg_scale: 8,
+    steps: 40,
+    style_preset: "anime",
+  };
+
+  if (consistencySeed !== null) {
+    requestBody.seed = consistencySeed;
+  }
+
+  const response = await axios.post(
+    "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image",
+    requestBody,
+    {
+      headers: {
+        Authorization: `Bearer ${STABILITY_API_KEY}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      timeout: 90000,
+    }
+  );
+
+  const artifact = response.data?.artifacts?.[0];
+  if (!artifact || !artifact.base64) {
+    throw new Error("Stability returned no valid artifacts");
+  }
+
+  const buffer = Buffer.from(artifact.base64, "base64");
+  await fsp.writeFile(outPath, buffer);
+  console.log("Image generated successfully with Stability AI");
+}
+
+/**
+ * Main function to generate image (switches between providers)
  */
 async function generateSceneImage(
   scene,
@@ -114,76 +187,30 @@ async function generateSceneImage(
   const filename = `scene_${scene.index ?? Date.now()}_${Date.now()}.png`;
   const outPath = path.join(IMAGES_DIR, filename);
 
+  console.log(`\n🎨 Generating image with provider: ${IMAGE_PROVIDER}`);
+
   try {
-    if (!STABILITY_API_KEY) {
-      throw new Error("Missing STABILITY_API_KEY env var");
-    }
-
-    console.log(
-      "Calling Stability AI for prompt:",
-      prompt.slice(0, 100) + "..."
-    );
-    console.log("Using consistency seed:", consistencySeed || "random");
-
-    // Build request body with consistency features
-    const requestBody = {
-      text_prompts: [
-        { text: prompt, weight: 1 },
-        { text: negativePrompt, weight: -1 }, // Negative prompt to avoid inconsistencies
-      ],
-      width: 1024,
-      height: 1024,
-      samples: 1,
-      cfg_scale: 8, // Slightly higher for better prompt adherence
-      steps: 40, // More steps for better quality
-      style_preset: "anime", // You can change to "anime", "comic-book", etc.
-    };
-
-    // Add seed for consistency if provided (same seed = similar style)
-    if (consistencySeed !== null) {
-      requestBody.seed = consistencySeed;
-    }
-
-    // SDXL text-to-image endpoint (returns base64 in artifacts)
-    const response = await axios.post(
-      "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image",
-      requestBody,
-      {
-        headers: {
-          Authorization: `Bearer ${STABILITY_API_KEY}`,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        timeout: 90000, // Increased timeout for more steps
-      }
-    );
-
-    console.log("Stability response status:", response.status);
-    console.log("Stability response keys:", Object.keys(response.data || {}));
-
-    const artifact = response.data?.artifacts?.[0];
-    if (!artifact) {
-      console.error(
-        "No artifacts in response:",
-        JSON.stringify(response.data, null, 2)
+    // Switch between providers
+    if (IMAGE_PROVIDER === "pollinations") {
+      await generateWithPollinations(prompt, filename, outPath);
+    } else if (IMAGE_PROVIDER === "stability") {
+      await generateWithStability(
+        prompt,
+        negativePrompt,
+        filename,
+        outPath,
+        consistencySeed
       );
-      throw new Error("Stability returned no artifacts");
+    } else {
+      throw new Error(`Unknown IMAGE_PROVIDER: ${IMAGE_PROVIDER}`);
     }
-    if (!artifact.base64) {
-      console.error("Artifact missing base64:", artifact);
-      throw new Error("Stability artifact missing base64");
-    }
-
-    const buffer = Buffer.from(artifact.base64, "base64");
-    await fsp.writeFile(outPath, buffer);
-    console.log("Image saved successfully:", filename);
   } catch (error) {
-    // Fallback to placeholder when API errors
+    // Fallback to placeholder on any error
     const errorMsg = error.response?.data
       ? JSON.stringify(error.response.data)
       : error.message;
-    console.error("Stability image failed:", errorMsg);
-    console.warn("Using placeholder image instead");
+    console.error(`${IMAGE_PROVIDER} image failed:`, errorMsg);
+    console.warn("⚠️  Using placeholder image instead");
 
     const label = encodeURIComponent(
       (scene.title || scene.description || "Scene").slice(0, 40)
@@ -193,23 +220,19 @@ async function generateSceneImage(
     await fsp.writeFile(outPath, Buffer.from(resp.data));
   }
 
-  // Return relative URL - frontend will prepend API base URL if needed
-  // The backend serves static files at /output/images/... so frontend can load directly
   return `/output/images/${filename}`;
 }
 
 /**
  * Generate a consistent seed based on job/project ID
- * This ensures all images in same project use same seed for consistency
  */
 function generateConsistencySeed(jobId) {
-  // Convert jobId to a numeric seed (0 to 4294967295)
   let hash = 0;
   const str = String(jobId);
   for (let i = 0; i < str.length; i++) {
     const char = str.charCodeAt(i);
     hash = (hash << 5) - hash + char;
-    hash = hash & hash; // Convert to 32bit integer
+    hash = hash & hash;
   }
   return Math.abs(hash) % 4294967295;
 }
